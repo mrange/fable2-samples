@@ -147,6 +147,7 @@ module Formlets =
       let t = adapt t
       F <| fun fp ps m d ->
         let tv, tvt, tft  = invoke t fp ps m d
+
         f tv, tvt, tft
 
     let withAttribute p t : Formlet<_> =
@@ -154,36 +155,35 @@ module Formlets =
       F <| fun fp ps m d ->
         invoke t fp (p::ps) m d
 
-    let container c t : Formlet<_> =
+    let container c cps t : Formlet<_> =
       let t = adapt t
       F <| fun fp ps m d ->
         // Resets the attributes passed
         let tv, tvt, tft  = invoke t fp [] m d
         let tes : _ seq   = upcast flatten tvt
-        let vt            = ViewTree.Element (c tes)
+        let vt            = ViewTree.Element (c (concat ps cps) tes)
 
         tv, vt, tft
 
     let textInput initial : Formlet<string> =
       F <| fun fp ps m d ->
-        let v = 
+        let v   = 
           match m with 
           | Model.Value v -> v 
           | _             -> initial
 
-        let vt = ViewTree.Element (input (concat ps [|Value v; OnChange <| fun v -> dispatch d v.Value|]))
+        let vt  = ViewTree.Element (input (concat ps [|Value v; OnChange <| fun v -> dispatch d v.Value|]))
 
         v, vt, zero ()
 
     let initial : Model = zero ()
 
-    let view t m d : ReactElement =
-      let t = adapt t
+    let view t c m d : ReactElement =
+      let t         = adapt t
       let _, tvt, _ = invoke t [] [] m (D d)
+      let es        = flatten tvt
 
-      let es = flatten tvt
-      let re = div [] es
-      re
+      c es
 
     let rec update mu m : Model =
       match mu, m with
@@ -194,10 +194,10 @@ module Formlets =
       | _                   , _                 -> update mu (Model.Fork (zero (), zero ()))
 
     let collect t m =
-      let t = adapt t
-      let tv, _, tft = invoke t [] [] m (D (fun _ -> ()))
+      let t           = adapt t
+      let tv, _, tft  = invoke t [] [] m (D (fun _ -> ()))
+      let fs          = flatten tft
 
-      let fs = flatten tft
       tv, fs
 
   type Formlet<'T> with
@@ -207,11 +207,10 @@ module Formlets =
 
 open Formlets
 
-let form = 
+let sampleForm = 
   Formlet.value (fun f s -> f, s)
   <*> (Formlet.textInput "Hello" |> Formlet.withAttribute (Class "test"))
   <*> Formlet.textInput "There"
-  |> Formlet.container (form [Class "test2"])
 
 let init () = Model.Empty
 
@@ -221,9 +220,10 @@ let update msg model =
   printfn "Update - before: %A" before
   let after  = Formlet.update msg model
   printfn "Update - after : %A" after
+
   after
 
-let view model dispatch = Formlet.view form model dispatch
+let view model dispatch = Formlet.view sampleForm (form []) model dispatch
   
 // App
 Program.mkSimple init update view
