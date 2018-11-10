@@ -154,6 +154,16 @@ module Formlets =
       F <| fun fp ps m d ->
         invoke t fp (p::ps) m d
 
+    let container c t : Formlet<_> =
+      let t = adapt t
+      F <| fun fp ps m d ->
+        // Resets the attributes passed
+        let tv, tvt, tft  = invoke t fp [] m d
+        let tes : _ seq   = upcast flatten tvt
+        let vt            = ViewTree.Element (c tes)
+
+        tv, vt, tft
+
     let textInput initial : Formlet<string> =
       F <| fun fp ps m d ->
         let v = 
@@ -201,6 +211,7 @@ let form =
   Formlet.value (fun f s -> f, s)
   <*> (Formlet.textInput "Hello" |> Formlet.withAttribute (Class "test"))
   <*> Formlet.textInput "There"
+  |> Formlet.container (form [Class "test2"])
 
 let init () = Model.Empty
 
