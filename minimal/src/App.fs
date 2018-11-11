@@ -55,18 +55,23 @@ module Formlets =
     static member Join (l, r) : Model = Fork (l, r)
 
   [<RequireQualifiedAccess>]
-  type ModelUpdate =
-    | Value     of string
-    | Left      of ModelUpdate
-    | Right     of ModelUpdate
+  type SubmitMethod = Commit | Cancel | Reset
 
+  [<RequireQualifiedAccess>]
+  type Message =
+    | Submit  of SubmitMethod
+    | Update  of string
+    | Left    of Message
+    | Right   of Message
+
+  [<RequireQualifiedAccess>]
   type ViewTree =
     | Empty
     | Element   of ReactElement
     | Fork      of ViewTree*ViewTree
 
     static member Zero        : ViewTree = Empty
-    static member Join (l, r) : ViewTree = 
+    static member Join (l, r) : ViewTree =
       match l, r with
       | Empty       , _           -> r
       | _           , Empty       -> l
@@ -80,12 +85,13 @@ module Formlets =
       let all = loop [] vt
       List.rev all
 
-  type Dispatcher = 
-    | D of (ModelUpdate -> unit)
+  type Dispatcher =
+    | D of (Message -> unit)
 
-    static member Value (D d) v     : unit        = d (ModelUpdate.Value v)
-    static member Left  (D d)       : Dispatcher  = D (fun mu -> d (ModelUpdate.Left mu))
-    static member Right (D d)       : Dispatcher  = D (fun mu -> d (ModelUpdate.Right mu))
+    static member Submit (D d) a  : unit        = d (Message.Submit a)
+    static member Update (D d) v  : unit        = d (Message.Update v)
+    static member Left   (D d)    : Dispatcher  = D (fun mu -> d (Message.Left mu))
+    static member Right  (D d)    : Dispatcher  = D (fun mu -> d (Message.Right mu))
 
   type Formlet<'T> = F of (FormletPath -> IHTMLProp list -> Model -> Dispatcher -> 'T*ViewTree*FailureTree)
 
@@ -94,9 +100,10 @@ module Formlets =
       let inline adapt  (F f)         = f
       let inline invoke f fp ps m d   = f fp ps m d
 
+      let inline submit d a           = Dispatcher.Submit d a
+      let inline update d v           = Dispatcher.Update d v
       let inline left d               = Dispatcher.Left d
       let inline right d              = Dispatcher.Right d
-      let inline dispatch d v         = Dispatcher.Value d v
 
       let inline zero ()              = LanguagePrimitives.GenericZero<_>
 
@@ -104,9 +111,15 @@ module Formlets =
 
       let inline flatten (l : ^T)     = (^T : (static member Flatten : ^T  -> ^U) l)
 
-      let inline concat ps tps        =
+      let inline concat ps (tps : IHTMLProp seq) =
         if List.isEmpty ps then tps
         else Seq.append ps tps
+
+      module Joins =
+        let apply     f s = f s
+        let andAlso   f s = f, s
+        let keepLeft  f _ = f
+        let keepRight _ s = s
 
     open Details
 
@@ -129,7 +142,7 @@ module Formlets =
 
         uv, join tvt uvt, join tft uft
 
-    let apply t u : Formlet<_> =
+    let join f t u : Formlet<_> =
       let t = adapt t
       let u = adapt u
       F <| fun fp ps m d ->
@@ -141,7 +154,12 @@ module Formlets =
         let tv, tvt, tft  = invoke t fp ps tm (left d)
         let uv, uvt, uft  = invoke u fp ps um (right d)
 
-        tv uv, join tvt uvt, join tft uft
+        (f tv uv), join tvt uvt, join tft uft
+
+    let apply     t u : Formlet<_> = join Joins.apply     t u
+    let andAlso   t u : Formlet<_> = join Joins.andAlso   t u
+    let keepLeft  t u : Formlet<_> = join Joins.keepLeft  t u
+    let keepRight t u : Formlet<_> = join Joins.keepRight t u
 
     let map t f : Formlet<_> =
       let t = adapt t
@@ -155,7 +173,7 @@ module Formlets =
       F <| fun fp ps m d ->
         invoke t fp (p::ps) m d
 
-    let container c cps t : Formlet<_> =
+    let withContainer c cps t : Formlet<_> =
       let t = adapt t
       F <| fun fp ps m d ->
         // Resets the attributes passed
@@ -164,17 +182,6 @@ module Formlets =
         let vt            = ViewTree.Element (c (concat ps cps) tes)
 
         tv, vt, tft
-
-    let textInput initial : Formlet<string> =
-      F <| fun fp ps m d ->
-        let v   = 
-          match m with 
-          | Model.Value v -> v 
-          | _             -> initial
-
-        let vt  = ViewTree.Element (input (concat ps [|Value v; OnChange <| fun v -> dispatch d v.Value|]))
-
-        v, vt, zero ()
 
     let initial : Model = zero ()
 
@@ -185,13 +192,27 @@ module Formlets =
 
       c es
 
-    let rec update mu m : Model =
-      match mu, m with
-      | ModelUpdate.Value v , _                 -> Model.Value v
-      | ModelUpdate.Left  u , Model.Fork (l, r) -> Model.Fork (update u l, r)
-      | ModelUpdate.Right u , Model.Fork (l, r) -> Model.Fork (l, update u r)
-      // mu is either left or right, create a new fork and update it
-      | _                   , _                 -> update mu (Model.Fork (zero (), zero ()))
+    let update msg m : Model =
+      let mutable submit = None
+      let rec loop msg m =
+        match msg, m with
+        | Message.Submit a  , m                 -> 
+          submit <- Some a  // TODO: Not very nice
+          m  
+        | Message.Update v  , _                 -> Model.Value v
+        | Message.Left  u   , Model.Fork (l, r) -> Model.Fork (loop u l, r)
+        | Message.Right u   , Model.Fork (l, r) -> Model.Fork (l, loop u r)
+        // mu is either left or right, create a new fork and update it
+        | _                 , _                 -> loop msg (Model.Fork (zero (), zero ()))
+      let m = loop msg m
+      match submit with
+      | None        -> m
+      | Some method ->
+        match method with
+        | SubmitMethod.Reset  -> initial
+        | SubmitMethod.Commit -> m      // TODO:
+        | SubmitMethod.Cancel -> m      // TODO:
+
 
     let collect t m =
       let t           = adapt t
@@ -200,31 +221,103 @@ module Formlets =
 
       tv, fs
 
+    type Builder () =
+      class
+        member x.Bind       (t, uf) = bind  t uf
+        member x.Return     v       = value v
+        member x.ReturnFrom t       = t : Formlet<_>
+        member x.Zero       ()      = value ()
+      end
+
+  let formlet = Formlet.Builder ()
+
   type Formlet<'T> with
     static member (>>=) (t, uf) = Formlet.bind  t uf
     static member (<*>) (f, t)  = Formlet.apply f t
     static member (|>>) (t, f)  = Formlet.map   t f
 
+    static member (<&>) (f, t)  = Formlet.andAlso   f t
+    static member (.>>.)(f, t)  = Formlet.andAlso   f t
+    static member (.>>) (f, t)  = Formlet.keepLeft  f t
+
+
+  module Bootstrap =
+    open Formlet
+    open Formlet.Details
+
+    let text hint initial : Formlet<string> =
+      F <| fun fp ps m d ->
+        let v   =
+          match m with
+          | Model.Value v -> v
+          | _             -> initial
+
+        let ie  =
+          input <|
+            concat ps
+              [|
+                Class         "form-control"
+                Placeholder   hint
+// TODO: OnBlur preferable as it forces less rebuilds, but default value causes resets to be missed
+//                DefaultValue  v
+//                OnBlur        <| fun v -> update d (box v.target :?> Fable.Import.Browser.HTMLInputElement).value
+                Value         v
+                OnChange      <| fun v -> update d v.Value
+              |]
+        let vt  = ViewTree.Element ie
+
+        v, vt, zero ()
+
+    let withLabel id lbl t : Formlet<_> =
+      let t = adapt t
+      F <| fun fp ps m d ->
+        let fp            = (FormletPathElement.Named lbl)::fp
+        let ps            = (Id id :> IHTMLProp)::ps
+        let tv, tvt, tft  = invoke t fp ps m d
+        let le            = label [|HTMLAttr.HtmlFor id|] [|str lbl|]
+        let vt            = join (ViewTree.Element le) tvt 
+
+        tv, vt, tft
+
+    let withFormGroup t = Formlet.withContainer div [|Class "form-group"|] t
+
+    let withSubmit t : Formlet<_> =
+      let t = adapt t
+      F <| fun fp ps m d ->
+        let tv, tvt, tft  = invoke t fp ps m d
+        let be            = 
+          div 
+            [||]
+            [|
+              button [|OnClick (fun _ -> submit d SubmitMethod.Commit); Type "button"; Class "btn btn-primary"|] [|str "Commit"|]
+              button [|OnClick (fun _ -> submit d SubmitMethod.Cancel); Type "button"; Class "btn"|]             [|str "Cancel"|]
+              button [|OnClick (fun _ -> submit d SubmitMethod.Reset ); Type "button"; Class "btn"|]             [|str "Reset"|]
+            |]
+        let vt            = join tvt (ViewTree.Element be) 
+
+        tv, vt, tft
+
 open Formlets
 
-let sampleForm = 
+let sampleForm =
+  let input lbl hint = Bootstrap.text hint "" |> Bootstrap.withLabel lbl lbl |> Bootstrap.withFormGroup
   Formlet.value (fun f s -> f, s)
-  <*> (Formlet.textInput "Hello" |> Formlet.withAttribute (Class "test"))
-  <*> Formlet.textInput "There"
+  <*> input "First name" "Enter first name"
+  <*> input "Last name"  "Enter last name"
+  |> Bootstrap.withSubmit
 
 let init () = Model.Empty
 
-let update msg model = 
+let update msg model =
   let before = model
   printfn "Update - msg   : %A" msg
   printfn "Update - before: %A" before
   let after  = Formlet.update msg model
   printfn "Update - after : %A" after
-
   after
 
 let view model dispatch = Formlet.view sampleForm (form []) model dispatch
-  
+
 // App
 Program.mkSimple init update view
 |> Program.withReact "elmish-app"
