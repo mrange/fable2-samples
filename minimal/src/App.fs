@@ -35,15 +35,18 @@ module Formlets =
       | _           , Empty       -> l
       | Suppress l  , Suppress r  -> Suppress (Fork (l, r))
       | _           , _           -> Fork (l, r)
-    static member Flatten ft  : (bool*FormletPath*string) list =
-      let rec loop suppress all ft =
+    static member Flatten ft  : (bool*FormletPath*string) array =
+      let ra = ResizeArray<_> 16
+      let rec loop suppress ft =
         match ft with
-        | FailureTree.Empty       -> all
-        | FailureTree.Leaf (p, m) -> (suppress, p, m)::all
-        | FailureTree.Suppress ft -> loop true all ft
-        | FailureTree.Fork (l, r) -> loop suppress (loop suppress all l) r
-      let all = loop false [] ft
-      List.rev all
+        | FailureTree.Empty       -> ()
+        | FailureTree.Leaf (p, m) -> ra.Add (suppress, p, m)
+        | FailureTree.Suppress ft -> loop true ft
+        | FailureTree.Fork (l, r) -> 
+          loop suppress l
+          loop suppress r
+      loop false ft
+      ra.ToArray ()
 
   [<RequireQualifiedAccess>]
   type Model =
@@ -72,14 +75,17 @@ module Formlets =
       | Empty       , _           -> r
       | _           , Empty       -> l
       | _           , _           -> Fork (l, r)
-    static member Flatten vt  : ReactElement list =
-      let rec loop all vt =
+    static member Flatten vt  : ReactElement array =
+      let ra = ResizeArray<_> 16
+      let rec loop vt =
         match vt with
-        | ViewTree.Empty        -> all
-        | ViewTree.Element e    -> e::all
-        | ViewTree.Fork (l, r)  -> loop (loop all l) r
-      let all = loop [] vt
-      List.rev all
+        | ViewTree.Empty        -> ()
+        | ViewTree.Element e    -> ra.Add e
+        | ViewTree.Fork (l, r)  -> 
+          loop l
+          loop r
+      loop vt
+      ra.ToArray ()
 
   type Dispatcher =
     | D of (ModelUpdate -> unit)
@@ -223,6 +229,23 @@ module Formlets =
     open Formlet
     open Formlet.Details
 
+    let withPanel lbl t : Formlet<_> =
+      let t = adapt t
+      F <| fun fp ps m d ->
+        let fp            = (FormletPathElement.Named lbl)::fp
+        let tv, tvt, tft  = invoke t fp [] m d
+        let es            = flatten tvt
+        let pe            =
+          div 
+            (attributes ps [|Class "card"; Style [MarginBottom "12px"]|])
+            [|
+              div [|Class "card-header"|] [|str lbl|]
+              div [|Class "card-body"|] es
+            |]
+        let vt            = ViewTree.Element pe
+
+        tv, vt, tft
+
     let text hint initial : Formlet<string> =
       F <| fun fp ps m d ->
         let v   =
@@ -235,16 +258,40 @@ module Formlets =
             attributes ps
               [|
                 Class         "form-control"
-                Placeholder   hint
 // TODO: OnBlur preferable as it forces less rebuilds, but default value causes resets to be missed
 //                DefaultValue  v
 //                OnBlur        <| fun v -> update d (box v.target :?> Fable.Import.Browser.HTMLInputElement).value
-                Value         v
                 OnChange      <| fun v -> update d v.Value
+                Placeholder   hint
+                Value         v
               |]
         let vt  = ViewTree.Element ie
 
         v, vt, zero ()
+
+    let checkBox id lbl : Formlet<bool> =
+      F <| fun fp ps m d ->
+        let isChecked =
+          match m with
+          | Model.Value "on"  -> true
+          | _                 -> false
+        let e             =
+          div 
+            (attributes ps [|Class "form-check"|])
+            [|
+              input 
+                [|
+                  Checked   isChecked
+                  Class     "form-check-input"
+                  Id        id
+                  Type      "checkbox"
+                  OnChange  <| fun v -> update d (if isChecked then "" else "on")
+                |]
+              label [|HTMLAttr.HtmlFor id|] [|str lbl|]
+            |]
+        let vt            = ViewTree.Element e
+
+        isChecked, vt, zero ()
 
     let withLabel id lbl t : Formlet<_> =
       let t = adapt t
@@ -257,6 +304,9 @@ module Formlets =
 
         tv, vt, tft
 
+    let withOption id lbl t : Formlet<_ option> =
+      checkBox id lbl >>= (fun v -> if v then map t Some else value None)
+
     let withFormGroup t = Formlet.withContainer div [|Class "form-group"|] t
 
     let asForm extractModel onUpdate onCommit onCancel onReset (t : Formlet<'T>) : Form<'Model, 'Msg> =
@@ -266,8 +316,16 @@ module Formlets =
         let onCommit d    = onCommit d tv
         let te            = flatten tvt
         let be            = 
-          let inline btn action cls lbl = button [|OnClick (fun _ -> action d); Type "button"; Class cls|] [|str lbl|]
-          div 
+          let inline btn action cls lbl = 
+            button 
+              [|
+                Class   cls
+                OnClick <|fun _ -> action d
+                Style   [CSSProp.MarginRight "8px"]
+                Type    "button"
+              |] 
+              [|str lbl|]
+          div
             [||]
             [|
               btn onCommit "btn btn-primary" "Commit"
@@ -278,7 +336,7 @@ module Formlets =
         form 
           [||]
           [|
-            div [||] te
+            (if te.Length > 0 then div [||] te else te.[0])
             be
           |]
 
@@ -291,10 +349,53 @@ type MyMessage  =
   | Reset
   | UpdateForm of ModelUpdate
 
+type Address =
+  {
+    CarryOver : string
+    Name      : string
+    Street1   : string
+    Street2   : string
+    Street3   : string
+    Zip       : string
+    City      : string
+    County    : string
+    Country   : string
+  }
+  static member New co n s1 s2 s3 zip city county country =
+    {
+      CarryOver = co
+      Name      = n
+      Street1   = s1
+      Street2   = s2
+      Street3   = s3
+      Zip       = zip
+      City      = city
+      County    = county
+      Country   = country
+    }
+
+type Customer =
+  {
+    FirstName       : string
+    LastName        : string
+    InvoiceAddress  : Address
+    DeliveryAddress : Address option
+  }
+  static member New fn ln ia da =
+    {
+      FirstName       = fn
+      LastName        = ln
+      InvoiceAddress  = ia
+      DeliveryAddress = da
+    }
+  
+
 let sampleForm =
   let extractModel  (M m) = m
   let onUpdate d    mu    = d (UpdateForm mu)
-  let onCommit d     v    = d Commit
+  let onCommit d     v    = 
+    printfn "Commit: %A" v
+    d Commit
   let onCancel d          = d Cancel
   let onReset  d          = d Reset
 
@@ -303,10 +404,29 @@ let sampleForm =
     |> Bootstrap.withLabel lbl lbl 
     |> Bootstrap.withFormGroup
 
-  Formlet.value (fun f s -> f, s)
-  <*> input "First name" "Enter first name"
-  <*> input "Last name"  "Enter last name"
-  |> Bootstrap.asForm extractModel onUpdate onCommit onCancel onReset
+  let address lbl =
+    Formlet.value Address.New
+    <*> input "Carry over"  ""
+    <*> input "Name"        ""
+    <*> input "Street"      ""
+    <*> input "Street"      ""
+    <*> input "Street"      ""
+    <*> input "Zip"         ""
+    <*> input "City"        ""
+    <*> input "County"      ""
+    <*> input "Country"     ""
+    |> Bootstrap.withPanel lbl
+
+  let customer = 
+    Formlet.value Customer.New
+    <*> input "First name" "Enter first name"
+    <*> input "Last name"  "Enter last name"
+    |> Bootstrap.withPanel "Customer"
+    <*> address "Invoice address"
+    <*> (address "Delivery address" |> Bootstrap.withOption "delivery-address?" "Use delivery address?")
+
+  customer |> Bootstrap.asForm extractModel onUpdate onCommit onCancel onReset
+
 
 let init () = M Model.Empty
 
@@ -323,7 +443,11 @@ let update msg (M model) =
     printfn "Update - after : %A" after
     M after
 
-let view model dispatch = Form.view sampleForm model dispatch
+let view model dispatch = 
+  div 
+    [|Style [CSSProp.Margin "12px"]|]
+    [|Form.view sampleForm model dispatch|]
+  
 
 // App
 Program.mkSimple init update view
