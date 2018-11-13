@@ -43,7 +43,7 @@ module Formlets =
         | FailureTree.Empty       -> ()
         | FailureTree.Leaf (p, m) -> ra.Add (suppress, p, m)
         | FailureTree.Suppress ft -> loop true ft
-        | FailureTree.Fork (l, r) -> 
+        | FailureTree.Fork (l, r) ->
           loop suppress l
           loop suppress r
       loop false ft
@@ -82,7 +82,7 @@ module Formlets =
         match vt with
         | ViewTree.Empty        -> ()
         | ViewTree.Element e    -> ra.Add e
-        | ViewTree.Fork (l, r)  -> 
+        | ViewTree.Fork (l, r)  ->
           loop l
           loop r
       loop vt
@@ -95,7 +95,7 @@ module Formlets =
     static member Left   (D d)    : Dispatcher  = D (fun mu -> d (ModelUpdate.Left mu))
     static member Right  (D d)    : Dispatcher  = D (fun mu -> d (ModelUpdate.Right mu))
 
-  type FormletContext = 
+  type FormletContext =
     {
       Attributes  : IHTMLProp list
       Classes     : string list
@@ -118,14 +118,14 @@ module Formlets =
       else
         (Style x.Styles :> IHTMLProp)::attrs
 
-    member x.AllAttributes ps = 
-      let attrs = 
+    member x.AllAttributes ps =
+      let attrs =
         x.Attributes
         |> x.AddClass
         |> x.AddStyle
       if attrs.IsEmpty then ps
       else Seq.append attrs ps
-      
+
     member inline x.InnerElement  ()  = { FormletContext.Zero with Path = x.Path  }
     member inline x.WithAttribute a   = { x with Attributes = a::x.Attributes     }
     member inline x.WithClass     c   = { x with Classes    = c::x.Classes        }
@@ -146,13 +146,13 @@ module Formlets =
     //let inline adapt  (F f)         = OptimizedClosures.FSharpFunc<_, _, _, _, _>.Adapt f
     //let inline invoke f fp ps m d   = (f : OptimizedClosures.FSharpFunc<_, _, _, _, _>).Invoke (fp, ps, m, d)
 
-    let pathToString ps = 
+    let pathToString ps =
       let sb = StringBuilder 16
       let inline app s = sb.Append (s : string) |> ignore
       let rec loop ps =
         match ps with
         | []                                -> ()
-        | (FormletPathElement.Named n)::ps  -> loop ps; app "."; app n 
+        | (FormletPathElement.Named n)::ps  -> loop ps; app "."; app n
       loop ps
       sb.ToString ()
     let inline update d v           = Dispatcher.Update d v
@@ -294,7 +294,7 @@ module Formlets =
 //        let ctx           = ctx.WithClass <| Required true
         let tv, tvt, tft  = invoke t ctx m d
         let valid         = String.length tv > 0
-        let tft           = 
+        let tft           =
           if valid then tft else join tft (FailureTree.Leaf (ctx.Path, "Is Empty"))
 
         tv, tvt, tft
@@ -312,7 +312,7 @@ module Formlets =
         let tv, tvt, tft  = invoke t ctx m d
         let tes           = flatten tvt
         let pe            =
-          div 
+          div
             attrs
             [|
               div [|Class "card-header" |]  [|str lbl|]
@@ -329,8 +329,8 @@ module Formlets =
           | Model.Value v -> v
           | _             -> initial
 
-        let attrs = 
-          ctx.AllAttributes               
+        let attrs =
+          ctx.AllAttributes
             [|
               Class         "form-control"
 // TODO: OnBlur preferable as it forces less rebuilds, but default value causes resets to be missed
@@ -355,10 +355,10 @@ module Formlets =
           | Model.Value "on"  -> true
           | _                 -> false
         let e         =
-          div 
+          div
             attrs
             [|
-              input 
+              input
                 [|
                   Checked   isChecked
                   Class     "form-check-input"
@@ -379,7 +379,7 @@ module Formlets =
         let ctx           = ctx.WithAttribute <| Id id
         let tv, tvt, tft  = invoke t ctx m d
         let le            = label [|HTMLAttr.HtmlFor id|] [|str lbl|]
-        let vt            = join (ViewTree.Element le) tvt 
+        let vt            = join (ViewTree.Element le) tvt
 
         tv, vt, tft
 
@@ -398,21 +398,21 @@ module Formlets =
         let onCommit d    = if tfs.Length = 0 then onCommit d tv else ()
         let lis           =
           tfs
-          |> Array.map (fun (s, p, m) -> 
+          |> Array.map (fun (s, p, m) ->
             let p   = pathToString p
             let cls = if s then "list-group-item list-group-item-warning" else "list-group-item list-group-item-danger"
-            li [|Class cls|] [|str (sprintf "§ %s - %s" p m)|])
+            li [|Class cls|] [|str (sprintf "ï¿½ %s - %s" p m)|])
         let ul            = ul [|Class "list-group"; Style [CSSProp.MarginBottom "12px"]|] lis
-        let be            = 
-          let inline btn action cls lbl dis = 
-            button 
+        let be            =
+          let inline btn action cls lbl dis =
+            button
               [|
                 Class   cls
                 Disabled dis
                 OnClick <|fun _ -> action d
                 Style   [CSSProp.MarginRight "8px"]
                 Type    "button"
-              |] 
+              |]
               [|str lbl|]
           div
             [|Style [CSSProp.MarginBottom "12px"]|]
@@ -422,7 +422,7 @@ module Formlets =
               btn onReset  "btn"             "Reset"  false
             |]
 
-        form 
+        form
           [||]
           [|
             be
@@ -434,7 +434,7 @@ module Formlets =
 open Formlets
 
 type MyModel    = M of Model
-type MyMessage  = 
+type MyMessage  =
   | Commit
   | Cancel
   | Reset
@@ -483,16 +483,16 @@ type Customer =
 let sampleForm =
   let extractModel  (M m) = m
   let onUpdate d    mu    = d (UpdateForm mu)
-  let onCommit d     v    = 
+  let onCommit d     v    =
     printfn "Commit: %A" v
     d Commit
   let onCancel d          = d Cancel
   let onReset  d          = d Reset
 
-  let input lbl hint v = 
-    Bootstrap.text hint "" 
+  let input lbl hint v =
+    Bootstrap.text hint ""
     |> v
-    |> Bootstrap.withLabel lbl lbl 
+    |> Bootstrap.withLabel lbl lbl
     |> Bootstrap.withFormGroup
 
   let address lbl =
@@ -508,7 +508,7 @@ let sampleForm =
     <*> input "Country"     ""  Validate.notEmpty
     |> Bootstrap.withPanel lbl
 
-  let customer = 
+  let customer =
     Formlet.value Customer.New
     <*> input "First name" "Enter first name" Validate.notEmpty
     <*> input "Last name"  "Enter last name"  Validate.notEmpty
@@ -526,7 +526,7 @@ let update msg (M model) =
   | Commit        -> M model
   | Cancel        -> M model
   | Reset         -> init ()
-  | UpdateForm mu -> 
+  | UpdateForm mu ->
     let before = model
     printfn "Update - msg   : %A" msg
     printfn "Update - before: %A" before
@@ -534,11 +534,11 @@ let update msg (M model) =
     printfn "Update - after : %A" after
     M after
 
-let view model dispatch = 
-  div 
+let view model dispatch =
+  div
     [|Style [CSSProp.Margin "12px"]|]
     [|Form.view sampleForm model dispatch|]
-  
+
 
 // App
 Program.mkSimple init update view
