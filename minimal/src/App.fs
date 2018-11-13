@@ -7,6 +7,7 @@ open Fable.Helpers.React.Props
 
 module Formlets =
   open Fable.Import.React
+  open System.Text
 
   [<RequireQualifiedAccess>]
   type FormletPathElement =
@@ -94,15 +95,53 @@ module Formlets =
     static member Left   (D d)    : Dispatcher  = D (fun mu -> d (ModelUpdate.Left mu))
     static member Right  (D d)    : Dispatcher  = D (fun mu -> d (ModelUpdate.Right mu))
 
-  type Formlet<'T> = F of (FormletPath -> IHTMLProp list -> Model -> Dispatcher -> 'T*ViewTree*FailureTree)
+  type FormletContext = 
+    {
+      Attributes  : IHTMLProp list
+      Classes     : string list
+      Path        : FormletPath
+      Styles      : CSSProp list
+    }
+
+    member x.AddClass (attrs : IHTMLProp list) =
+      if x.Classes.IsEmpty then attrs
+      else
+        let sb = StringBuilder 16
+        for c in x.Classes do
+          sb.Append " " |> ignore
+          sb.Append c |> ignore
+
+        (Class (sb.ToString ()) :> IHTMLProp)::attrs
+
+    member x.AddStyle  (attrs : IHTMLProp list) =
+      if x.Styles.IsEmpty then attrs
+      else
+        (Style x.Styles :> IHTMLProp)::attrs
+
+    member x.AllAttributes ps = 
+      let attrs = 
+        x.Attributes
+        |> x.AddClass
+        |> x.AddStyle
+      if attrs.IsEmpty then ps
+      else Seq.append attrs ps
+      
+    member inline x.InnerElement  ()  = { FormletContext.Zero with Path = x.Path  }
+    member inline x.WithAttribute a   = { x with Attributes = a::x.Attributes     }
+    member inline x.WithClass     c   = { x with Classes    = c::x.Classes        }
+    member inline x.WithPath      p   = { x with Path       = p::x.Path           }
+    member inline x.WithStyle     s   = { x with Styles     = s::x.Styles         }
+
+    static member New p c s a : FormletContext = { Path = p; Classes = c; Styles =s; Attributes = a }
+    static member Zero = FormletContext.New [] [] [] []
+
+  type Formlet<'T> = F of (FormletContext -> Model -> Dispatcher -> 'T*ViewTree*FailureTree)
 
   type Form<'Model, 'Msg> = Form of ('Model -> ('Msg -> unit) -> ReactElement)
 
   module Details =
-    open System.Text
-
     let inline adapt  (F f)         = f
-    let inline invoke f fp ps m d   = f fp ps m d
+    let inline invoke f ctx m d     = f ctx m d
     // TODO: Why doesn't this work?
     //let inline adapt  (F f)         = OptimizedClosures.FSharpFunc<_, _, _, _, _>.Adapt f
     //let inline invoke f fp ps m d   = (f : OptimizedClosures.FSharpFunc<_, _, _, _, _>).Invoke (fp, ps, m, d)
@@ -143,10 +182,6 @@ module Formlets =
 
   module Formlet =
     module Details =
-      let inline attributes ps tps    =
-        if List.isEmpty ps then tps
-        else Seq.append ps tps
-
       module Joins =
         let apply     f s = f s
         let andAlso   f s = f, s
@@ -156,35 +191,35 @@ module Formlets =
     open Details
 
     let value v : Formlet<_> =
-      F <| fun fp ps m d ->
+      F <| fun ctx m d ->
         v, zero (), zero ()
 
     let bind t uf : Formlet<_> =
       let t = adapt t
-      F <| fun fp ps m d ->
+      F <| fun ctx m d ->
         let tm, um =
           match m with
           | Model.Fork (l, r) -> l, r
           | _                 -> zero (), zero ()
 
-        let tv, tvt, tft  = invoke t fp ps tm (left d)
+        let tv, tvt, tft  = invoke t ctx tm (left d)
         let u             = uf tv
         let u             = adapt u
-        let uv, uvt, uft  = invoke u fp ps um (right d)
+        let uv, uvt, uft  = invoke u ctx um (right d)
 
         uv, join tvt uvt, join tft uft
 
     let combine f t u : Formlet<_> =
       let t = adapt t
       let u = adapt u
-      F <| fun fp ps m d ->
+      F <| fun ctx m d ->
         let tm, um =
           match m with
           | Model.Fork (l, r) -> l, r
           | _                 -> zero (), zero ()
 
-        let tv, tvt, tft  = invoke t fp ps tm (left d)
-        let uv, uvt, uft  = invoke u fp ps um (right d)
+        let tv, tvt, tft  = invoke t ctx tm (left d)
+        let uv, uvt, uft  = invoke u ctx um (right d)
 
         (f tv uv), join tvt uvt, join tft uft
 
@@ -195,23 +230,38 @@ module Formlets =
 
     let map t f : Formlet<_> =
       let t = adapt t
-      F <| fun fp ps m d ->
-        let tv, tvt, tft  = invoke t fp ps m d
+      F <| fun ctx m d ->
+        let tv, tvt, tft  = invoke t ctx m d
 
         f tv, tvt, tft
 
     let withAttribute p t : Formlet<_> =
       let t = adapt t
-      F <| fun fp ps m d ->
-        invoke t fp (p::ps) m d
+      F <| fun ctx m d ->
+        let ctx = ctx.WithAttribute p
+        invoke t ctx m d
 
-    let withContainer c cps t : Formlet<_> =
+    let withClass c t : Formlet<_> =
       let t = adapt t
-      F <| fun fp ps m d ->
+      F <| fun ctx m d ->
+        let ctx = ctx.WithClass c
+        invoke t ctx m d
+
+    let withStyle s t : Formlet<_> =
+      let t = adapt t
+      F <| fun ctx m d ->
+        let ctx = ctx.WithStyle s
+        invoke t ctx m d
+
+    let withContainer c t : Formlet<_> =
+      let t = adapt t
+      F <| fun ctx m d ->
         // Resets the attributes passed
-        let tv, tvt, tft  = invoke t fp [] m d
+        let attrs         = ctx.AllAttributes []
+        let ctx           = ctx.InnerElement ()
+        let tv, tvt, tft  = invoke t ctx m d
         let tes           = flatten tvt
-        let vt            = ViewTree.Element (c (attributes ps cps) tes)
+        let vt            = ViewTree.Element (c attrs tes)
 
         tv, vt, tft
 
@@ -239,26 +289,31 @@ module Formlets =
 
     let notEmpty t : Formlet<string> =
       let t = adapt t
-      F <| fun fp ps m d ->
-        let tv, tvt, tft  = invoke t fp ps m d
+      F <| fun ctx m d ->
+        let ctx           = ctx.WithAttribute <| Required true
+//        let ctx           = ctx.WithClass <| Required true
+        let tv, tvt, tft  = invoke t ctx m d
+        let valid         = String.length tv > 0
         let tft           = 
-          if String.length tv > 0 then tft else join tft (FailureTree.Leaf (fp, "Is Empty"))
+          if valid then tft else join tft (FailureTree.Leaf (ctx.Path, "Is Empty"))
 
         tv, tvt, tft
 
   module Bootstrap =
     open Formlet
-    open Formlet.Details
 
     let withPanel lbl t : Formlet<_> =
       let t = adapt t
-      F <| fun fp ps m d ->
-        let fp            = (FormletPathElement.Named lbl)::fp
-        let tv, tvt, tft  = invoke t fp [] m d
+      F <| fun ctx m d ->
+        let attrs         = ctx.AllAttributes [|Class "card"; Style [MarginBottom "12px"]|]
+        let ctx           = ctx.InnerElement ()
+        let ctx           = ctx.WithPath <| FormletPathElement.Named lbl
+        let ctx           = ctx.InnerElement ()
+        let tv, tvt, tft  = invoke t ctx m d
         let tes           = flatten tvt
         let pe            =
           div 
-            (attributes ps [|Class "card"; Style [MarginBottom "12px"]|])
+            attrs
             [|
               div [|Class "card-header" |]  [|str lbl|]
               div [|Class "card-body"   |]  tes
@@ -268,37 +323,40 @@ module Formlets =
         tv, vt, tft
 
     let text hint initial : Formlet<string> =
-      F <| fun fp ps m d ->
-        let v   =
+      F <| fun ctx m d ->
+        let v     =
           match m with
           | Model.Value v -> v
           | _             -> initial
 
-        let ie  =
-          input <|
-            attributes ps
-              [|
-                Class         "form-control"
+        let attrs = 
+          ctx.AllAttributes               
+            [|
+              Class         "form-control"
 // TODO: OnBlur preferable as it forces less rebuilds, but default value causes resets to be missed
-//                DefaultValue  v
-//                OnBlur        <| fun v -> update d (box v.target :?> Fable.Import.Browser.HTMLInputElement).value
-                OnChange      <| fun v -> update d v.Value
-                Placeholder   hint
-                Value         v
-              |]
-        let vt  = ViewTree.Element ie
+// TODO: Fix reset
+              DefaultValue  v
+              OnBlur        <| fun v -> update d (box v.target :?> Fable.Import.Browser.HTMLInputElement).value
+//              OnChange      <| fun v -> update d v.Value
+              Placeholder   hint
+//              Value         v
+            |]
+
+        let ie    = input attrs
+        let vt    = ViewTree.Element ie
 
         v, vt, zero ()
 
     let checkBox id lbl : Formlet<bool> =
-      F <| fun fp ps m d ->
+      F <| fun ctx m d ->
+        let attrs     = ctx.AllAttributes [|Class "form-check"|]
         let isChecked =
           match m with
           | Model.Value "on"  -> true
           | _                 -> false
-        let e             =
+        let e         =
           div 
-            (attributes ps [|Class "form-check"|])
+            attrs
             [|
               input 
                 [|
@@ -316,10 +374,10 @@ module Formlets =
 
     let withLabel id lbl t : Formlet<_> =
       let t = adapt t
-      F <| fun fp ps m d ->
-        let fp            = (FormletPathElement.Named lbl)::fp
-        let ps            = (Id id :> IHTMLProp)::ps
-        let tv, tvt, tft  = invoke t fp ps m d
+      F <| fun ctx m d ->
+        let ctx           = ctx.WithPath <| FormletPathElement.Named lbl
+        let ctx           = ctx.WithAttribute <| Id id
+        let tv, tvt, tft  = invoke t ctx m d
         let le            = label [|HTMLAttr.HtmlFor id|] [|str lbl|]
         let vt            = join (ViewTree.Element le) tvt 
 
@@ -328,12 +386,12 @@ module Formlets =
     let withOption id lbl t : Formlet<_ option> =
       checkBox id lbl >>= (fun v -> if v then map t Some else value None)
 
-    let withFormGroup t = Formlet.withContainer div [|Class "form-group"|] t
+    let withFormGroup t = Formlet.withContainer div t |> Formlet.withClass "form-group"
 
     let asForm extractModel onUpdate onCommit onCancel onReset (t : Formlet<'T>) : Form<'Model, 'Msg> =
       let t = adapt t
       Form <| fun m d ->
-        let tv, tvt, tft  = invoke t [] [] (extractModel m) (D <| fun mu -> onUpdate d mu)
+        let tv, tvt, tft  = invoke t (zero ()) (extractModel m) (D <| fun mu -> onUpdate d mu)
 
         let tes           = flatten tvt
         let tfs           = flatten tft
