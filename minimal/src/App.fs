@@ -99,21 +99,31 @@ module Formlets =
   type Form<'Model, 'Msg> = Form of ('Model -> ('Msg -> unit) -> ReactElement)
 
   module Details =
+    open System.Text
+
     let inline adapt  (F f)         = f
     let inline invoke f fp ps m d   = f fp ps m d
     // TODO: Why doesn't this work?
     //let inline adapt  (F f)         = OptimizedClosures.FSharpFunc<_, _, _, _, _>.Adapt f
     //let inline invoke f fp ps m d   = (f : OptimizedClosures.FSharpFunc<_, _, _, _, _>).Invoke (fp, ps, m, d)
 
+    let pathToString ps = 
+      let sb = StringBuilder 16
+      let inline app s = sb.Append (s : string) |> ignore
+      let rec loop ps =
+        match ps with
+        | []                                -> ()
+        | (FormletPathElement.Named n)::ps  -> loop ps; app "."; app n 
+      loop ps
+      sb.ToString ()
     let inline update d v           = Dispatcher.Update d v
-    let inline left d               = Dispatcher.Left d
-    let inline right d              = Dispatcher.Right d
+    let inline left   d             = Dispatcher.Left d
+    let inline right  d             = Dispatcher.Right d
 
-    let inline zero ()              = LanguagePrimitives.GenericZero<_>
-
-    let inline join l r             =  (^T : (static member Join : ^T * ^T -> ^T) (l, r))
-
-    let inline flatten (l : ^T)     = (^T : (static member Flatten : ^T  -> ^U) l)
+    let inline zero     ()          = LanguagePrimitives.GenericZero<_>
+    let inline join     l r         = (^T : (static member Join : ^T * ^T -> ^T) (l, r))
+    let inline flatten  l           = (^T : (static member Flatten : ^T  -> ^U) l)
+    let inline toString l           = (^T : (member ToString : unit  -> string) l)
   open Details
 
   module Form =
@@ -200,7 +210,7 @@ module Formlets =
       F <| fun fp ps m d ->
         // Resets the attributes passed
         let tv, tvt, tft  = invoke t fp [] m d
-        let tes : _ seq   = upcast flatten tvt
+        let tes           = flatten tvt
         let vt            = ViewTree.Element (c (attributes ps cps) tes)
 
         tv, vt, tft
@@ -224,6 +234,17 @@ module Formlets =
     static member (.>>.)(f, t)  = Formlet.andAlso   f t
     static member (.>>) (f, t)  = Formlet.keepLeft  f t
 
+  module Validate =
+    let nop t : Formlet<_> = t
+
+    let notEmpty t : Formlet<string> =
+      let t = adapt t
+      F <| fun fp ps m d ->
+        let tv, tvt, tft  = invoke t fp ps m d
+        let tft           = 
+          if String.length tv > 0 then tft else join tft (FailureTree.Leaf (fp, "Is Empty"))
+
+        tv, tvt, tft
 
   module Bootstrap =
     open Formlet
@@ -234,13 +255,13 @@ module Formlets =
       F <| fun fp ps m d ->
         let fp            = (FormletPathElement.Named lbl)::fp
         let tv, tvt, tft  = invoke t fp [] m d
-        let es            = flatten tvt
+        let tes           = flatten tvt
         let pe            =
           div 
             (attributes ps [|Class "card"; Style [MarginBottom "12px"]|])
             [|
-              div [|Class "card-header"|] [|str lbl|]
-              div [|Class "card-body"|] es
+              div [|Class "card-header" |]  [|str lbl|]
+              div [|Class "card-body"   |]  tes
             |]
         let vt            = ViewTree.Element pe
 
@@ -313,30 +334,42 @@ module Formlets =
       let t = adapt t
       Form <| fun m d ->
         let tv, tvt, tft  = invoke t [] [] (extractModel m) (D <| fun mu -> onUpdate d mu)
-        let onCommit d    = onCommit d tv
-        let te            = flatten tvt
+
+        let tes           = flatten tvt
+        let tfs           = flatten tft
+        let onCommit d    = if tfs.Length = 0 then onCommit d tv else ()
+        let lis           =
+          tfs
+          |> Array.map (fun (s, p, m) -> 
+            let p   = pathToString p
+            let cls = if s then "list-group-item list-group-item-warning" else "list-group-item list-group-item-danger"
+            li [|Class cls|] [|str (sprintf "§ %s - %s" p m)|])
+        let ul            = ul [|Class "list-group"; Style [CSSProp.MarginBottom "12px"]|] lis
         let be            = 
-          let inline btn action cls lbl = 
+          let inline btn action cls lbl dis = 
             button 
               [|
                 Class   cls
+                Disabled dis
                 OnClick <|fun _ -> action d
                 Style   [CSSProp.MarginRight "8px"]
                 Type    "button"
               |] 
               [|str lbl|]
           div
-            [||]
+            [|Style [CSSProp.MarginBottom "12px"]|]
             [|
-              btn onCommit "btn btn-primary" "Commit"
-              btn onCancel "btn"             "Cancel"
-              btn onReset  "btn"             "Reset"
+              btn onCommit "btn btn-primary" "Commit" (tfs.Length > 0)
+              btn onCancel "btn"             "Cancel" false
+              btn onReset  "btn"             "Reset"  false
             |]
 
         form 
           [||]
           [|
-            (if te.Length > 0 then div [||] te else te.[0])
+            be
+            ul
+            (if tes.Length > 0 then div [||] tes else tes.[0])
             be
           |]
 
@@ -388,7 +421,6 @@ type Customer =
       InvoiceAddress  = ia
       DeliveryAddress = da
     }
-  
 
 let sampleForm =
   let extractModel  (M m) = m
@@ -399,28 +431,29 @@ let sampleForm =
   let onCancel d          = d Cancel
   let onReset  d          = d Reset
 
-  let input lbl hint = 
+  let input lbl hint v = 
     Bootstrap.text hint "" 
+    |> v
     |> Bootstrap.withLabel lbl lbl 
     |> Bootstrap.withFormGroup
 
   let address lbl =
     Formlet.value Address.New
-    <*> input "Carry over"  ""
-    <*> input "Name"        ""
-    <*> input "Street"      ""
-    <*> input "Street"      ""
-    <*> input "Street"      ""
-    <*> input "Zip"         ""
-    <*> input "City"        ""
-    <*> input "County"      ""
-    <*> input "Country"     ""
+    <*> input "Carry over"  ""  Validate.nop
+    <*> input "Name"        ""  Validate.notEmpty
+    <*> input "Street"      ""  Validate.notEmpty
+    <*> input "Street"      ""  Validate.nop
+    <*> input "Street"      ""  Validate.nop
+    <*> input "Zip"         ""  Validate.notEmpty
+    <*> input "City"        ""  Validate.notEmpty
+    <*> input "County"      ""  Validate.nop
+    <*> input "Country"     ""  Validate.notEmpty
     |> Bootstrap.withPanel lbl
 
   let customer = 
     Formlet.value Customer.New
-    <*> input "First name" "Enter first name"
-    <*> input "Last name"  "Enter last name"
+    <*> input "First name" "Enter first name" Validate.notEmpty
+    <*> input "Last name"  "Enter last name"  Validate.notEmpty
     |> Bootstrap.withPanel "Customer"
     <*> address "Invoice address"
     <*> (address "Delivery address" |> Bootstrap.withOption "delivery-address?" "Use delivery address?")
