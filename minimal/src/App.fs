@@ -1,4 +1,4 @@
-module App
+﻿module App
 
 open Elmish
 open Elmish.React
@@ -8,6 +8,7 @@ open Fable.Helpers.React.Props
 module Formlets =
   open Fable.Import.React
   open System.Text
+  open System.Text.RegularExpressions
 
   [<RequireQualifiedAccess>]
   type FormletPathElement =
@@ -67,8 +68,12 @@ module Formlets =
   [<RequireQualifiedAccess>]
   type ViewTree =
     | Empty
-    | Element   of ReactElement
-    | Fork      of ViewTree*ViewTree
+    | Element         of ReactElement
+    | DelayedElement  of (IHTMLProp list -> string -> CSSProp list -> ReactElement)
+    | WithAttribute   of IHTMLProp*ViewTree
+    | WithClass       of string*ViewTree
+    | WithStyle       of CSSProp*ViewTree
+    | Fork            of ViewTree*ViewTree
 
     static member Zero        : ViewTree = Empty
     static member Join (l, r) : ViewTree =
@@ -76,16 +81,20 @@ module Formlets =
       | Empty       , _           -> r
       | _           , Empty       -> l
       | _           , _           -> Fork (l, r)
-    static member Flatten vt  : ReactElement array =
+    static member Flatten vt : ReactElement array =
       let ra = ResizeArray<_> 16
-      let rec loop vt =
+      let rec loop aa cc ss vt =
         match vt with
-        | ViewTree.Empty        -> ()
-        | ViewTree.Element e    -> ra.Add e
-        | ViewTree.Fork (l, r)  ->
-          loop l
-          loop r
-      loop vt
+        | ViewTree.Empty                  -> ()
+        | ViewTree.Element        e       -> ra.Add e
+        | ViewTree.DelayedElement d       -> ra.Add (d aa cc ss)
+        | ViewTree.WithAttribute  (a, t)  -> loop (a::aa) cc ss t
+        | ViewTree.WithClass      (c, t)  -> loop aa (c + " " + cc) ss t
+        | ViewTree.WithStyle      (s, t)  -> loop aa cc (s::ss) t
+        | ViewTree.Fork           (l, r)  ->
+          loop aa cc ss l
+          loop aa cc ss r
+      loop [] "" [] vt
       ra.ToArray ()
 
   type Dispatcher =
@@ -95,56 +104,20 @@ module Formlets =
     static member Left   (D d)    : Dispatcher  = D (fun mu -> d (ModelUpdate.Left mu))
     static member Right  (D d)    : Dispatcher  = D (fun mu -> d (ModelUpdate.Right mu))
 
-  type FormletContext =
-    {
-      Attributes  : IHTMLProp list
-      Classes     : string list
-      Path        : FormletPath
-      Styles      : CSSProp list
-    }
-
-    member x.AddClass (attrs : IHTMLProp list) =
-      if x.Classes.IsEmpty then attrs
-      else
-        let sb = StringBuilder 16
-        for c in x.Classes do
-          sb.Append " " |> ignore
-          sb.Append c |> ignore
-
-        (Class (sb.ToString ()) :> IHTMLProp)::attrs
-
-    member x.AddStyle  (attrs : IHTMLProp list) =
-      if x.Styles.IsEmpty then attrs
-      else
-        (Style x.Styles :> IHTMLProp)::attrs
-
-    member x.AllAttributes ps =
-      let attrs =
-        x.Attributes
-        |> x.AddClass
-        |> x.AddStyle
-      if attrs.IsEmpty then ps
-      else Seq.append attrs ps
-
-    member inline x.InnerElement  ()  = { FormletContext.Zero with Path = x.Path  }
-    member inline x.WithAttribute a   = { x with Attributes = a::x.Attributes     }
-    member inline x.WithClass     c   = { x with Classes    = c::x.Classes        }
-    member inline x.WithPath      p   = { x with Path       = p::x.Path           }
-    member inline x.WithStyle     s   = { x with Styles     = s::x.Styles         }
-
-    static member New p c s a : FormletContext = { Path = p; Classes = c; Styles =s; Attributes = a }
-    static member Zero = FormletContext.New [] [] [] []
-
-  type Formlet<'T> = F of (FormletContext -> Model -> Dispatcher -> 'T*ViewTree*FailureTree)
+  type Formlet<'T> = F of (FormletPath -> Model -> Dispatcher -> 'T*ViewTree*FailureTree)
 
   type Form<'Model, 'Msg> = Form of ('Model -> ('Msg -> unit) -> ReactElement)
 
   module Details =
     let inline adapt  (F f)         = f
-    let inline invoke f ctx m d     = f ctx m d
+    let inline invoke f fp m d      = f fp m d
+
+    let inline flip f a b           = f b a
     // TODO: Why doesn't this work?
     //let inline adapt  (F f)         = OptimizedClosures.FSharpFunc<_, _, _, _, _>.Adapt f
     //let inline invoke f fp ps m d   = (f : OptimizedClosures.FSharpFunc<_, _, _, _, _>).Invoke (fp, ps, m, d)
+
+    let inline isGood ft            = FailureTree.IsGood ft
 
     let pathToString ps =
       let sb = StringBuilder 16
@@ -163,6 +136,20 @@ module Formlets =
     let inline join     l r         = (^T : (static member Join : ^T * ^T -> ^T) (l, r))
     let inline flatten  l           = (^T : (static member Flatten : ^T  -> ^U) l)
     let inline toString l           = (^T : (member ToString : unit  -> string) l)
+
+
+    let inline delayedElement_ e    =
+      ViewTree.DelayedElement <| fun aa cc ss ->
+        let aa = (Class cc :> IHTMLProp)::(Style ss :> IHTMLProp)::aa
+        e aa
+    let inline delayedElement e a c s  =
+      ViewTree.DelayedElement <| fun aa cc ss ->
+        let aa = a@aa
+        let cc = c + " " + cc
+        let ss = s@ss
+        let aa = (Class cc :> IHTMLProp)::(Style ss :> IHTMLProp)::aa
+        e aa
+
   open Details
 
   module Form =
@@ -191,35 +178,35 @@ module Formlets =
     open Details
 
     let value v : Formlet<_> =
-      F <| fun ctx m d ->
+      F <| fun fp m d ->
         v, zero (), zero ()
 
     let bind t uf : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
+      F <| fun fp m d ->
         let tm, um =
           match m with
           | Model.Fork (l, r) -> l, r
           | _                 -> zero (), zero ()
 
-        let tv, tvt, tft  = invoke t ctx tm (left d)
+        let tv, tvt, tft  = invoke t fp tm (left d)
         let u             = uf tv
         let u             = adapt u
-        let uv, uvt, uft  = invoke u ctx um (right d)
+        let uv, uvt, uft  = invoke u fp um (right d)
 
         uv, join tvt uvt, join tft uft
 
     let combine f t u : Formlet<_> =
       let t = adapt t
       let u = adapt u
-      F <| fun ctx m d ->
+      F <| fun fp m d ->
         let tm, um =
           match m with
           | Model.Fork (l, r) -> l, r
           | _                 -> zero (), zero ()
 
-        let tv, tvt, tft  = invoke t ctx tm (left d)
-        let uv, uvt, uft  = invoke u ctx um (right d)
+        let tv, tvt, tft  = invoke t fp tm (left d)
+        let uv, uvt, uft  = invoke u fp um (right d)
 
         (f tv uv), join tvt uvt, join tft uft
 
@@ -230,40 +217,45 @@ module Formlets =
 
     let map t f : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let tv, tvt, tft  = invoke t ctx m d
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
 
         f tv, tvt, tft
 
     let withAttribute p t : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let ctx = ctx.WithAttribute p
-        invoke t ctx m d
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
+        let tvt           = ViewTree.WithAttribute (p, tvt)
+
+        tv, tvt, tft
 
     let withClass c t : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let ctx = ctx.WithClass c
-        invoke t ctx m d
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
+        let tvt           = ViewTree.WithClass (c, tvt)
+
+        tv, tvt, tft
 
     let withStyle s t : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let ctx = ctx.WithStyle s
-        invoke t ctx m d
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
+        let tvt           = ViewTree.WithStyle (s, tvt)
+
+        tv, tvt, tft
 
     let withContainer c t : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
+      F <| fun fp m d ->
         // Resets the attributes passed
-        let attrs         = ctx.AllAttributes []
-        let ctx           = ctx.InnerElement ()
-        let tv, tvt, tft  = invoke t ctx m d
+        let tv, tvt, tft  = invoke t fp m d
         let tes           = flatten tvt
-        let vt            = ViewTree.Element (c attrs tes)
+        let d             = (flip c) tes
+        let tvt           = delayedElement_ d
 
-        tv, vt, tft
+        tv, tvt, tft
 
     type Builder () =
       class
@@ -285,54 +277,57 @@ module Formlets =
     static member (.>>) (f, t)  = Formlet.keepLeft  f t
 
   module Validate =
-    let nop t : Formlet<_> = t
+    let yes t : Formlet<_> = t
 
     let notEmpty t : Formlet<string> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let ctx           = ctx.WithAttribute <| Required true
-//        let ctx           = ctx.WithClass <| Required true
-        let tv, tvt, tft  = invoke t ctx m d
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
         let valid         = String.length tv > 0
-        let tft           =
-          if valid then tft else join tft (FailureTree.Leaf (ctx.Path, "Is Empty"))
+        let tft           = if valid then tft else join tft (FailureTree.Leaf (fp, "You must provide a value."))
+        let tvt           = ViewTree.WithAttribute (Required true, tvt)
+        let tvt           = ViewTree.WithClass ((if valid then "is-valid" else "is-invalid"), tvt)
 
         tv, tvt, tft
 
+    let regex (r : Regex) (msg : string) t : Formlet<string> =
+      let t = adapt t
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
+        let valid         = r.IsMatch tv
+        let tft           = if valid then tft else join tft (FailureTree.Leaf (fp, msg))
+        let tvt           = ViewTree.WithAttribute (Required true, tvt)
+        let tvt           = ViewTree.WithClass ((if valid then "is-valid" else "is-invalid"), tvt)
+
+        tv, tvt, tft
   module Bootstrap =
     open Formlet
 
     let withPanel lbl t : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let attrs         = ctx.AllAttributes [|Class "card"; Style [MarginBottom "12px"]|]
-        let ctx           = ctx.InnerElement ()
-        let ctx           = ctx.WithPath <| FormletPathElement.Named lbl
-        let ctx           = ctx.InnerElement ()
-        let tv, tvt, tft  = invoke t ctx m d
+      F <| fun fp m d ->
+        let fp            = (FormletPathElement.Named lbl)::fp
+        let tv, tvt, tft  = invoke t fp m d
         let tes           = flatten tvt
-        let pe            =
-          div
-            attrs
+        let d             =
+          flip div
             [|
               div [|Class "card-header" |]  [|str lbl|]
               div [|Class "card-body"   |]  tes
             |]
-        let vt            = ViewTree.Element pe
+        let tvt           = delayedElement d [] "card" [MarginBottom "12px"]
 
-        tv, vt, tft
+        tv, tvt, tft
 
     let text hint initial : Formlet<string> =
-      F <| fun ctx m d ->
-        let v     =
+      F <| fun fp m d ->
+        let v =
           match m with
           | Model.Value v -> v
           | _             -> initial
 
-        let attrs =
-          ctx.AllAttributes
-            [|
-              Class         "form-control"
+        let aa : IHTMLProp list =
+            [
 // TODO: OnBlur preferable as it forces less rebuilds, but default value causes resets to be missed
 // TODO: Fix reset
               DefaultValue  v
@@ -340,23 +335,20 @@ module Formlets =
 //              OnChange      <| fun v -> update d v.Value
               Placeholder   hint
 //              Value         v
-            |]
+            ]
 
-        let ie    = input attrs
-        let vt    = ViewTree.Element ie
+        let tvt = delayedElement input aa "form-control" []
 
-        v, vt, zero ()
+        v, tvt, zero ()
 
     let checkBox id lbl : Formlet<bool> =
-      F <| fun ctx m d ->
-        let attrs     = ctx.AllAttributes [|Class "form-check"|]
+      F <| fun fp m d ->
         let isChecked =
           match m with
           | Model.Value "on"  -> true
           | _                 -> false
-        let e         =
-          div
-            attrs
+        let d         =
+          flip div
             [|
               input
                 [|
@@ -368,20 +360,40 @@ module Formlets =
                 |]
               label [|HTMLAttr.HtmlFor id|] [|str lbl|]
             |]
-        let vt            = ViewTree.Element e
+        let tvt       = delayedElement d [] "form-check" []
 
-        isChecked, vt, zero ()
+        isChecked, tvt, zero ()
 
     let withLabel id lbl t : Formlet<_> =
       let t = adapt t
-      F <| fun ctx m d ->
-        let ctx           = ctx.WithPath <| FormletPathElement.Named lbl
-        let ctx           = ctx.WithAttribute <| Id id
-        let tv, tvt, tft  = invoke t ctx m d
-        let le            = label [|HTMLAttr.HtmlFor id|] [|str lbl|]
-        let vt            = join (ViewTree.Element le) tvt
+      F <| fun fp m d ->
+        let fp            = (FormletPathElement.Named lbl)::fp
+        let tv, tvt, tft  = invoke t fp m d
+        let e             = label [|HTMLAttr.HtmlFor id|] [|str lbl|]
+        let tvt           = ViewTree.WithAttribute (Id id, tvt)
+        let tvt           = join (ViewTree.Element e) tvt
 
-        tv, vt, tft
+        tv, tvt, tft
+
+    let withValidationFeedback t : Formlet<_> =
+      let t = adapt t
+      F <| fun fp m d ->
+        let tv, tvt, tft  = invoke t fp m d
+        if isGood tft then
+          tv, tvt, tft
+        else
+          let tes           = flatten tft
+          let sb            = StringBuilder 16
+          let inline app s  = sb.Append (s : string) |> ignore
+          for (suppress, fp, msg) in tes do
+            if not suppress then
+              app msg
+              app " "
+          let e =
+            div [|Class "invalid-feedback"|] [|str (sb.ToString ())|]
+          let tvt = join tvt (ViewTree.Element e)
+
+          tv, tvt, tft
 
     let withOption id lbl t : Formlet<_ option> =
       checkBox id lbl >>= (fun v -> if v then map t Some else value None)
@@ -391,17 +403,18 @@ module Formlets =
     let asForm extractModel onUpdate onCommit onCancel onReset (t : Formlet<'T>) : Form<'Model, 'Msg> =
       let t = adapt t
       Form <| fun m d ->
-        let tv, tvt, tft  = invoke t (zero ()) (extractModel m) (D <| fun mu -> onUpdate d mu)
+        let tv, tvt, tft  = invoke t [] (extractModel m) (D <| fun mu -> onUpdate d mu)
 
         let tes           = flatten tvt
         let tfs           = flatten tft
-        let onCommit d    = if tfs.Length = 0 then onCommit d tv else ()
+        let valid         = isGood tft
+        let onCommit d    = if valid then onCommit d tv else ()
         let lis           =
           tfs
           |> Array.map (fun (s, p, m) ->
             let p   = pathToString p
             let cls = if s then "list-group-item list-group-item-warning" else "list-group-item list-group-item-danger"
-            li [|Class cls|] [|str (sprintf "� %s - %s" p m)|])
+            li [|Class cls|] [|str (sprintf "§ %s - %s" p m)|])
         let ul            = ul [|Class "list-group"; Style [CSSProp.MarginBottom "12px"]|] lis
         let be            =
           let inline btn action cls lbl dis =
@@ -415,9 +428,9 @@ module Formlets =
               |]
               [|str lbl|]
           div
-            [|Style [CSSProp.MarginBottom "12px"]|]
+            [|Style [CSSProp.MarginBottom "12px"; CSSProp.MarginTop "12px"]|]
             [|
-              btn onCommit "btn btn-primary" "Commit" (tfs.Length > 0)
+              btn onCommit "btn btn-primary" "Commit" (not valid)
               btn onCancel "btn"             "Cancel" false
               btn onReset  "btn"             "Reset"  false
             |]
@@ -469,16 +482,20 @@ type Customer =
   {
     FirstName       : string
     LastName        : string
+    SocialNo        : string
     InvoiceAddress  : Address
     DeliveryAddress : Address option
   }
-  static member New fn ln ia da =
+  static member New fn ln sno ia da =
     {
       FirstName       = fn
       LastName        = ln
+      SocialNo        = sno
       InvoiceAddress  = ia
       DeliveryAddress = da
     }
+
+open System.Text.RegularExpressions
 
 let sampleForm =
   let extractModel  (M m) = m
@@ -493,31 +510,36 @@ let sampleForm =
     Bootstrap.text hint ""
     |> v
     |> Bootstrap.withLabel lbl lbl
+    |> Bootstrap.withValidationFeedback
     |> Bootstrap.withFormGroup
 
   let address lbl =
     Formlet.value Address.New
-    <*> input "Carry over"  ""  Validate.nop
+    <*> input "Carry over"  ""  Validate.yes
     <*> input "Name"        ""  Validate.notEmpty
     <*> input "Street"      ""  Validate.notEmpty
-    <*> input "Street"      ""  Validate.nop
-    <*> input "Street"      ""  Validate.nop
+    <*> input "Street"      ""  Validate.yes
+    <*> input "Street"      ""  Validate.yes
     <*> input "Zip"         ""  Validate.notEmpty
     <*> input "City"        ""  Validate.notEmpty
-    <*> input "County"      ""  Validate.nop
+    <*> input "County"      ""  Validate.yes
     <*> input "Country"     ""  Validate.notEmpty
     |> Bootstrap.withPanel lbl
+ 
+  let regexSocialNo = Regex "^\d{6}-\d{5}$"
+
+  let validateSocialNo = Validate.regex regexSocialNo "You must provide a valid Social No (DDMMYY-CCCCC)"
 
   let customer =
     Formlet.value Customer.New
     <*> input "First name" "Enter first name" Validate.notEmpty
     <*> input "Last name"  "Enter last name"  Validate.notEmpty
+    <*> input "Social no"  "Enter social no"  validateSocialNo
     |> Bootstrap.withPanel "Customer"
     <*> address "Invoice address"
     <*> (address "Delivery address" |> Bootstrap.withOption "delivery-address?" "Use delivery address?")
 
   customer |> Bootstrap.asForm extractModel onUpdate onCommit onCancel onReset
-
 
 let init () = M Model.Empty
 
