@@ -525,7 +525,7 @@ let sampleForm =
     <*> input "County"      ""  Validate.yes
     <*> input "Country"     ""  Validate.notEmpty
     |> Bootstrap.withPanel lbl
- 
+
   let regexSocialNo = Regex "^\d{6}-\d{5}$"
 
   let validateSocialNo = Validate.regex regexSocialNo "You must provide a valid Social No (DDMMYY-CCCCC)"
@@ -534,7 +534,7 @@ let sampleForm =
     Formlet.value Customer.New
     <*> input "First name" "Enter first name" Validate.notEmpty
     <*> input "Last name"  "Enter last name"  Validate.notEmpty
-    <*> input "Social no"  "Enter social no"  validateSocialNo
+    <*> input "Social no"  "Enter social no"  (Validate.notEmpty >> validateSocialNo)
     |> Bootstrap.withPanel "Customer"
     <*> address "Invoice address"
     <*> (address "Delivery address" |> Bootstrap.withOption "delivery-address?" "Use delivery address?")
